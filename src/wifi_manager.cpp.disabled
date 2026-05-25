@@ -1,0 +1,379 @@
+/*
+ * WiFi Manager — Implementation
+ * Reads wifi.json from SD, manages WiFi connection, HTTP file server, NTP
+ */
+#include "wifi_manager.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SD.h>
+#include <time.h>
+
+// ============================================================================
+//  WiFi Config
+// ============================================================================
+#define MAX_WIFI_NETWORKS 4
+#define MAX_SSID_LEN 33
+#define MAX_PASS_LEN 65
+
+static char wifi_ssids[MAX_WIFI_NETWORKS][MAX_SSID_LEN];
+static char wifi_passwords[MAX_WIFI_NETWORKS][MAX_PASS_LEN];
+static int  wifi_network_count = 0;
+static bool wifi_initialized = false;
+static bool server_running = false;
+
+static WebServer *httpServer = nullptr;
+
+// ============================================================================
+//  JSON Config Parser (minimal, no ArduinoJson dependency)
+// ============================================================================
+static bool parseWifiJson(const char *json) {
+    wifi_network_count = 0;
+    for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+        char ssidKey[8], passKey[12];
+        snprintf(ssidKey, sizeof(ssidKey), "ssid%d", i);
+        snprintf(passKey, sizeof(passKey), "password%d", i);
+
+        // Find "ssidN": "value"
+        const char *p = strstr(json, ssidKey);
+        if (!p) continue;
+        p = strchr(p, ':');
+        if (!p) continue;
+        p = strchr(p, '"');
+        if (!p) continue;
+        p++; // skip opening quote
+        const char *end = strchr(p, '"');
+        if (!end || (end - p) >= MAX_SSID_LEN) continue;
+        int len = end - p;
+        memcpy(wifi_ssids[i], p, len);
+        wifi_ssids[i][len] = '\0';
+
+        // Find "passwordN": "value"
+        p = strstr(json, passKey);
+        if (p) {
+            p = strchr(p, ':');
+            if (p) {
+                p = strchr(p, '"');
+                if (p) {
+                    p++;
+                    end = strchr(p, '"');
+                    if (end && (end - p) < MAX_PASS_LEN) {
+                        len = end - p;
+                        memcpy(wifi_passwords[i], p, len);
+                        wifi_passwords[i][len] = '\0';
+                    }
+                }
+            }
+        }
+
+        if (wifi_ssids[i][0] != '\0') {
+            wifi_network_count = i + 1;
+        }
+    }
+    return wifi_network_count > 0;
+}
+
+// ============================================================================
+//  WiFi Init / Connect
+// ============================================================================
+bool wifi_manager_init(void) {
+    memset(wifi_ssids, 0, sizeof(wifi_ssids));
+    memset(wifi_passwords, 0, sizeof(wifi_passwords));
+
+    File f = SD.open("/retro-go/config/wifi.json", FILE_READ);
+    if (!f) {
+        printf("[WiFi] No wifi.json found\n");
+        return false;
+    }
+
+    char buf[512];
+    int len = f.readBytes(buf, sizeof(buf) - 1);
+    buf[len] = '\0';
+    f.close();
+
+    if (!parseWifiJson(buf)) {
+        printf("[WiFi] No valid networks in wifi.json\n");
+        return false;
+    }
+
+    wifi_initialized = true;
+    printf("[WiFi] Loaded %d network(s)\n", wifi_network_count);
+    return true;
+}
+
+bool wifi_manager_connect(int network_index) {
+    if (!wifi_initialized || network_index >= wifi_network_count) return false;
+    if (wifi_ssids[network_index][0] == '\0') return false;
+
+    printf("[WiFi] Connecting to '%s'...\n", wifi_ssids[network_index]);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(wifi_ssids[network_index], wifi_passwords[network_index]);
+
+    int timeout = 20; // 10 seconds
+    while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+        delay(500);
+        timeout--;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        printf("[WiFi] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+        return true;
+    } else {
+        printf("[WiFi] Connection failed!\n");
+        WiFi.disconnect();
+        return false;
+    }
+}
+
+void wifi_manager_disconnect(void) {
+    if (server_running) wifi_manager_stop_server();
+    WiFi.disconnect();
+    WiFi.mode(WIFI_OFF);
+    printf("[WiFi] Disconnected\n");
+}
+
+bool wifi_manager_is_connected(void) {
+    return WiFi.status() == WL_CONNECTED;
+}
+
+const char* wifi_manager_get_ip(void) {
+    static char ipBuf[16];
+    if (WiFi.status() == WL_CONNECTED) {
+        strncpy(ipBuf, WiFi.localIP().toString().c_str(), sizeof(ipBuf)-1);
+    } else {
+        strcpy(ipBuf, "0.0.0.0");
+    }
+    return ipBuf;
+}
+
+const char* wifi_manager_get_ssid(int index) {
+    if (index < 0 || index >= MAX_WIFI_NETWORKS) return "";
+    return wifi_ssids[index];
+}
+
+int wifi_manager_get_network_count(void) {
+    return wifi_network_count;
+}
+
+// ============================================================================
+//  HTTP File Server
+// ============================================================================
+static String getContentType(const String &path) {
+    if (path.endsWith(".htm") || path.endsWith(".html")) return "text/html";
+    if (path.endsWith(".css")) return "text/css";
+    if (path.endsWith(".js"))  return "application/javascript";
+    if (path.endsWith(".json")) return "application/json";
+    if (path.endsWith(".png")) return "image/png";
+    if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
+    if (path.endsWith(".gif")) return "image/gif";
+    if (path.endsWith(".ico")) return "image/x-icon";
+    return "application/octet-stream";
+}
+
+static void handleRoot() {
+    String html = "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Retro-Gamer File Manager</title>"
+        "<style>"
+        "body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;margin:0;padding:20px}"
+        "h1{color:#00d4ff;text-align:center}"
+        "a{color:#00d4ff;text-decoration:none}"
+        "a:hover{text-decoration:underline}"
+        ".file{padding:4px 8px;margin:2px 0;display:flex;justify-content:space-between}"
+        ".file:hover{background:#16213e}"
+        ".dir{color:#ffc107;font-weight:bold}"
+        ".upload{background:#16213e;padding:15px;border-radius:8px;margin:10px 0}"
+        "input[type=file]{color:#e0e0e0}"
+        "button{background:#00d4ff;color:#000;border:none;padding:8px 16px;cursor:pointer;border-radius:4px}"
+        "button:hover{background:#00b8d4}"
+        ".bar{background:#16213e;padding:10px;border-radius:8px;margin-bottom:10px}"
+        "</style></head><body>";
+
+    html += "<h1>🎮 Retro-Gamer File Manager</h1>";
+
+    String path = httpServer->hasArg("dir") ? httpServer->arg("dir") : "/";
+    if (!path.startsWith("/")) path = "/" + path;
+
+    html += "<div class='bar'>📁 " + path + "</div>";
+
+    // Upload form
+    html += "<div class='upload'><form method='POST' action='/upload?dir=" + path +
+            "' enctype='multipart/form-data'>"
+            "<input type='file' name='file' multiple>"
+            "<button type='submit'>Upload</button></form></div>";
+
+    // Parent directory link
+    if (path != "/") {
+        String parent = path.substring(0, path.lastIndexOf('/'));
+        if (parent.length() == 0) parent = "/";
+        html += "<div class='file'><a class='dir' href='/?dir=" + parent + "'>📁 ..</a></div>";
+    }
+
+    // List directory
+    File dir = SD.open(path.c_str());
+    if (dir && dir.isDirectory()) {
+        File entry = dir.openNextFile();
+        while (entry) {
+            String name = entry.name();
+            // Extract just the filename
+            int lastSlash = name.lastIndexOf('/');
+            String displayName = (lastSlash >= 0) ? name.substring(lastSlash + 1) : name;
+
+            if (entry.isDirectory()) {
+                html += "<div class='file'><a class='dir' href='/?dir=" + name + "'>📁 " + displayName + "/</a></div>";
+            } else {
+                String sizeStr;
+                size_t sz = entry.size();
+                if (sz >= 1048576) sizeStr = String(sz / 1048576) + " MB";
+                else if (sz >= 1024) sizeStr = String(sz / 1024) + " KB";
+                else sizeStr = String(sz) + " B";
+
+                html += "<div class='file'><a href='/download?file=" + name + "'>" + displayName + "</a>"
+                        "<span>" + sizeStr + " <a href='/delete?file=" + name + "&dir=" + path + "' "
+                        "onclick='return confirm(\"Delete " + displayName + "?\")'>🗑️</a></span></div>";
+            }
+            entry = dir.openNextFile();
+        }
+        dir.close();
+    }
+
+    html += "<hr><p style='text-align:center;color:#666'>Retro-Gamer v1.0 | Free: " +
+            String(SD.totalBytes() / 1048576) + "MB / " +
+            String(SD.usedBytes() / 1048576) + "MB used</p>";
+    html += "</body></html>";
+
+    httpServer->send(200, "text/html", html);
+}
+
+static void handleDownload() {
+    if (!httpServer->hasArg("file")) {
+        httpServer->send(400, "text/plain", "Missing file parameter");
+        return;
+    }
+    String path = httpServer->arg("file");
+    File f = SD.open(path.c_str(), FILE_READ);
+    if (!f) {
+        httpServer->send(404, "text/plain", "File not found");
+        return;
+    }
+    httpServer->streamFile(f, getContentType(path));
+    f.close();
+}
+
+static File uploadFile;
+static String uploadDir;
+
+static void handleUpload() {
+    HTTPUpload &upload = httpServer->upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        uploadDir = httpServer->hasArg("dir") ? httpServer->arg("dir") : "/";
+        if (!uploadDir.endsWith("/")) uploadDir += "/";
+        String filepath = uploadDir + upload.filename;
+        printf("[HTTP] Upload: %s\n", filepath.c_str());
+        uploadFile = SD.open(filepath.c_str(), FILE_WRITE);
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (uploadFile) uploadFile.write(upload.buf, upload.currentSize);
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (uploadFile) {
+            printf("[HTTP] Upload done: %u bytes\n", upload.totalSize);
+            uploadFile.close();
+        }
+    }
+}
+
+static void handleUploadDone() {
+    String dir = httpServer->hasArg("dir") ? httpServer->arg("dir") : "/";
+    httpServer->sendHeader("Location", "/?dir=" + dir);
+    httpServer->send(303);
+}
+
+static void handleDelete() {
+    if (!httpServer->hasArg("file")) {
+        httpServer->send(400, "text/plain", "Missing file parameter");
+        return;
+    }
+    String path = httpServer->arg("file");
+    String dir = httpServer->hasArg("dir") ? httpServer->arg("dir") : "/";
+
+    if (SD.remove(path.c_str())) {
+        printf("[HTTP] Deleted: %s\n", path.c_str());
+    } else {
+        printf("[HTTP] Delete failed: %s\n", path.c_str());
+    }
+    httpServer->sendHeader("Location", "/?dir=" + dir);
+    httpServer->send(303);
+}
+
+static void handleMkdir() {
+    if (!httpServer->hasArg("name")) {
+        httpServer->send(400, "text/plain", "Missing name parameter");
+        return;
+    }
+    String dir = httpServer->hasArg("dir") ? httpServer->arg("dir") : "/";
+    String path = dir;
+    if (!path.endsWith("/")) path += "/";
+    path += httpServer->arg("name");
+    SD.mkdir(path.c_str());
+    httpServer->sendHeader("Location", "/?dir=" + dir);
+    httpServer->send(303);
+}
+
+bool wifi_manager_start_server(void) {
+    if (!wifi_manager_is_connected()) return false;
+    if (httpServer) { delete httpServer; httpServer = nullptr; }
+
+    httpServer = new WebServer(80);
+    httpServer->on("/", HTTP_GET, handleRoot);
+    httpServer->on("/download", HTTP_GET, handleDownload);
+    httpServer->on("/upload", HTTP_POST, handleUploadDone, handleUpload);
+    httpServer->on("/delete", HTTP_GET, handleDelete);
+    httpServer->on("/mkdir", HTTP_GET, handleMkdir);
+    httpServer->begin();
+
+    server_running = true;
+    printf("[HTTP] Server started on port 80\n");
+    return true;
+}
+
+void wifi_manager_stop_server(void) {
+    if (httpServer) {
+        httpServer->stop();
+        delete httpServer;
+        httpServer = nullptr;
+    }
+    server_running = false;
+    printf("[HTTP] Server stopped\n");
+}
+
+void wifi_manager_process(void) {
+    if (server_running && httpServer) {
+        httpServer->handleClient();
+    }
+}
+
+// ============================================================================
+//  NTP Time Sync
+// ============================================================================
+bool wifi_manager_ntp_sync(const char *timezone) {
+    if (!wifi_manager_is_connected()) return false;
+
+    const char *tz = timezone ? timezone : "UTC0";
+    configTzTime(tz, "pool.ntp.org", "time.nist.gov");
+
+    // Wait up to 5 seconds for time sync
+    struct tm timeinfo;
+    for (int i = 0; i < 10; i++) {
+        if (getLocalTime(&timeinfo, 500)) {
+            printf("[NTP] Time: %04d-%02d-%02d %02d:%02d:%02d\n",
+                   timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                   timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+            return true;
+        }
+    }
+    printf("[NTP] Sync failed\n");
+    return false;
+}
