@@ -538,18 +538,24 @@ You can use the same SD card between retro-go and Retro-Gamer.
 
 ## Credits & Licenses
 
+**Retro-Gamer** is open-source software licensed under the **GNU General Public License v3.0 or later (GPL-3.0-or-later)**.
+Due to the inclusion of GPL-3.0 components (like FabGL, gwenesis, and gw-emulator) that are statically linked, the entire combined work must be distributed under the terms of the GPL-3.0.
+
 ### Emulator Cores
 
 | Core | Origin | Author | License |
 |------|--------|--------|---------|
-| nofrendo | [retro-go](https://github.com/ducalex/retro-go) | ducalex | GPL-2.0 |
-| gnuboy | [retro-go](https://github.com/ducalex/retro-go) | ducalex | GPL-2.0 |
-| smsplus | [retro-go](https://github.com/ducalex/retro-go) | ducalex | GPL-2.0 |
-| huexpress | [retro-go](https://github.com/ducalex/retro-go) | ducalex | GPL-2.0 |
-| snes9x | [snes9x](https://github.com/snes9xgit/snes9x) | snes9x team | Custom |
-| handy | [retro-go](https://github.com/ducalex/retro-go) | K. Wilkins | Zlib |
-| gwenesis | [gwenesis](https://github.com/bzhxx/gwenesis) | bzhxx | MIT |
-| prboom | [prboom](https://prboom.sourceforge.net/) | prboom team | GPL-2.0 |
+| nofrendo | [retro-go](https://github.com/ducalex/retro-go) | Matthew Conte / ducalex | LGPL-2.0 |
+| gnuboy | [retro-go](https://github.com/ducalex/retro-go) | ducalex | GPL-2.0+ |
+| smsplus | [retro-go](https://github.com/ducalex/retro-go) | ducalex | GPL-2.0+ |
+| pce-go | [retro-go](https://github.com/ducalex/retro-go) | ducalex | GPL-2.0+ |
+| snes9x | [snes9x](https://github.com/snes9xgit/snes9x) | snes9x team | Custom (Non-Commercial) |
+| handy | [retro-go](https://github.com/ducalex/retro-go) | K. Wilkins | zlib |
+| gwenesis | [gwenesis](https://github.com/bzhxx/gwenesis) | bzhxx | GPL-3.0 |
+| prboom | [prboom](https://prboom.sourceforge.net/) | prboom team | GPL-2.0+ |
+| gw-emulator | [gw-emulator](https://github.com/bzhxx/gw-emulator) | bzhxx | GPL-3.0 & BSD-3-Clause |
+
+*(Note: The inclusion of Snes9x with its Non-Commercial clause technically creates a restriction incompatible with the GPL for the combined work. If distributing this software commercially, Snes9x must be removed.)*
 
 ### Libraries
 
